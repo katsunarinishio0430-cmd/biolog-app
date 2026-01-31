@@ -60,6 +60,7 @@ def init_sheets():
     except Exception as e:
         st.error(f"接続エラー: {e}")
 
+# キャッシュ機能
 @st.cache_data(ttl=60)
 def load_data(worksheet_name):
     try:
@@ -70,11 +71,17 @@ def load_data(worksheet_name):
     except:
         return pd.DataFrame()
 
-def save_to_sheet(worksheet_name, data_dict):
+# リスト形式のデータを一括保存する関数へ変更
+def save_rows_to_sheet(worksheet_name, data_list):
     sh = connect_to_sheet()
     ws = sh.worksheet(worksheet_name)
-    ws.append_row(list(data_dict.values()))
+    # data_listは辞書のリストなので、値のリストのリストに変換
+    rows = [list(d.values()) for d in data_list]
+    ws.append_rows(rows)
     load_data.clear()
+
+def save_to_sheet(worksheet_name, data_dict):
+    save_rows_to_sheet(worksheet_name, [data_dict])
 
 # ==========================================
 # ロジック関数
@@ -154,11 +161,15 @@ def analyze_meal_image(image):
 # UI構築
 # ==========================================
 st.set_page_config(layout="wide", page_title="Bio-Log Cloud V2")
-st.title("☁️ Bio-Log Cloud V2")
+st.title("☁️ Bio-Log Cloud V2 (JST)")
 
 if 'sheet_init' not in st.session_state:
     init_sheets()
     st.session_state.sheet_init = True
+
+# ワークアウトの「一時保存リスト」を初期化
+if 'workout_queue' not in st.session_state:
+    st.session_state.workout_queue = []
 
 # --- サイドバー ---
 with st.sidebar:
@@ -239,12 +250,9 @@ with tab2:
             st.warning("この種目のデータはまだありません。")
 
 with tab3:
-    st.subheader("📅 日時設定")
-    
-    # ★ここが修正ポイント: 日本時間(JST)を取得して初期値にする
+    st.subheader("📅 日時設定 (JST)")
     JST = timezone(timedelta(hours=9), 'JST')
     
-    # Session Stateを使って「最初に開いた時の時間」を保存し、勝手に更新されないようにする
     if 'default_date' not in st.session_state:
         st.session_state.default_date = datetime.now(JST).date()
     if 'default_time' not in st.session_state:
@@ -252,7 +260,6 @@ with tab3:
 
     c_date, c_time = st.columns(2)
     input_date = c_date.date_input("日付", value=st.session_state.default_date)
-    # 時間の入力を、ユーザーが変更しない限り固定
     input_time = c_time.time_input("時間", value=st.session_state.default_time)
     
     target_datetime = datetime.combine(input_date, input_time)
@@ -263,33 +270,72 @@ with tab3:
     
     col_w, col_m = st.columns(2)
     
+    # -------------------------
+    # 筋トレ入力 (リスト追加式)
+    # -------------------------
     with col_w:
-        with st.form("workout_form"):
-            st.subheader("🏋️ 筋トレ")
+        st.subheader("🏋️ 筋トレ入力")
+        
+        # フォーム: リストに追加するための入力エリア
+        with st.form("workout_add_form"):
             ex_list = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "アームカール", "ランニング"]
             ex_name = st.selectbox("種目", ex_list)
-            weight_in = st.number_input("重量(kg)", 60.0, step=2.5)
-            reps_in = st.number_input("回数", 10, step=1)
-            sets_in = st.number_input("セット", 3, step=1)
-            duration_in = st.number_input("時間(分)", 10, step=5)
             
-            submitted_w = st.form_submit_button("筋トレを保存", type="primary")
+            # 【修正】min_value=0.0を指定し、valueを初期値として渡すことでマイナス側への変更を可能に
+            weight_in = st.number_input("重量(kg)", min_value=0.0, value=60.0, step=2.5)
+            reps_in = st.number_input("回数", min_value=0, value=10, step=1)
+            sets_in = st.number_input("セット", min_value=1, value=1, step=1) # 1セットずつ追加推奨
+            duration_in = st.number_input("時間(分)", min_value=0, value=5, step=1)
             
-            if submitted_w:
+            # 「リストに追加」ボタン
+            add_to_queue = st.form_submit_button("リストに追加 (まだ保存されません)")
+            
+            if add_to_queue:
                 workout_burn = round(6.0 * weight * (duration_in / 60) * 1.05, 1)
                 volume = weight_in * reps_in * sets_in
                 
-                data = {
+                # 一時保存用リストに追加
+                item = {
                     "Date": formatted_date,
                     "Day": formatted_day,
                     "Exercise": ex_name, "Weight": weight_in, "Reps": reps_in, 
                     "Sets": sets_in, "Duration": duration_in, "Burned_Cal": workout_burn,
                     "Volume": volume
                 }
-                save_to_sheet(WS_WORKOUT, data)
-                update_daily_summary_sheet(daily_base_burn)
-                st.success(f"保存完了! ({formatted_date})")
+                st.session_state.workout_queue.append(item)
+                st.success(f"リストに追加: {ex_name} {weight_in}kg")
 
+        # -------------------------
+        # 保存エリア
+        # -------------------------
+        st.markdown("#### 📝 送信待ちリスト")
+        
+        if len(st.session_state.workout_queue) > 0:
+            # 現在のリストを表示
+            df_queue = pd.DataFrame(st.session_state.workout_queue)
+            # 表示するカラムを絞る
+            st.dataframe(df_queue[["Exercise", "Weight", "Reps", "Sets", "Volume"]], hide_index=True)
+            
+            # まとめてクラウドへ保存
+            if st.button("クラウドに一括保存", type="primary"):
+                with st.spinner("送信中..."):
+                    save_rows_to_sheet(WS_WORKOUT, st.session_state.workout_queue)
+                    update_daily_summary_sheet(daily_base_burn)
+                    
+                    # 保存完了後、リストをクリア
+                    st.session_state.workout_queue = []
+                    st.success("全てのデータを保存しました！")
+                    st.rerun() # 画面をリロードしてリストを消す
+            
+            if st.button("リストをクリア"):
+                st.session_state.workout_queue = []
+                st.rerun()
+        else:
+            st.info("ここにセットが追加されます")
+
+    # -------------------------
+    # 食事入力 (従来通り)
+    # -------------------------
     with col_m:
         st.subheader("🥗 食事")
         img_file = st.file_uploader("画像", type=["jpg", "png"])
@@ -306,4 +352,3 @@ with tab3:
                     save_to_sheet(WS_MEAL, data)
                     update_daily_summary_sheet(daily_base_burn)
                     st.success(f"保存: {res.get('menu_name')} ({formatted_date})")
-                    
