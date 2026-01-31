@@ -7,14 +7,13 @@ import os
 from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import altair as alt # グラフ描画用
 
 # ==========================================
 # 設定: APIキー & シート設定
 # ==========================================
-# あなたのAPIキーをここに入れてください
 DEFAULT_API_KEY = "AIzaSyBOlQW_7uW0g62f_NujUBlMDpWtpefHidc" 
 
-# クラウド(Secrets)にあればそれを使い、なければ直書きを使う
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
@@ -29,26 +28,18 @@ WS_MEAL = "meal_log"
 WS_SUMMARY = "daily_summary"
 
 # ==========================================
-# データ操作関数 (ハイブリッド対応版)
+# データ操作関数
 # ==========================================
 def connect_to_sheet():
-    """スプレッドシートに接続する（ローカル/クラウド両対応）"""
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    
-    # 1. クラウドのSecretsに設定がある場合（本番環境）
     if "gcp_service_account" in st.secrets:
-        # SecretsからJSON文字列を読み込んで辞書化
         key_dict = json.loads(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
-    
-    # 2. ローカルにjsonファイルがある場合（開発環境）
     elif os.path.exists(JSON_FILE):
         creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
-    
     else:
-        st.error("認証情報が見つかりません。Secretsを設定するかjsonファイルを置いてください。")
+        st.error("認証情報が見つかりません。")
         return None
-
     client = gspread.authorize(creds)
     return client.open(SHEET_NAME)
 
@@ -63,9 +54,9 @@ def init_sheets():
                 ws = sh.add_worksheet(title=title, rows=100, cols=20)
                 ws.append_row(header)
         
-        create_if_missing(WS_WORKOUT, ["Date", "Day", "Exercise", "Weight", "Reps", "Sets", "Duration", "Burned_Cal"])
+        create_if_missing(WS_WORKOUT, ["Date", "Day", "Exercise", "Weight", "Reps", "Sets", "Duration", "Burned_Cal", "Volume"])
         create_if_missing(WS_MEAL, ["Date", "Day", "Menu_Name", "Calories", "Protein", "Fat", "Carbs"])
-        create_if_missing(WS_SUMMARY, ["Date", "Intake", "Burned", "Balance", "P", "F", "C"])
+        create_if_missing(WS_SUMMARY, ["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
     except Exception as e:
         st.error(f"接続エラー: {e}")
 
@@ -83,24 +74,38 @@ def save_to_sheet(worksheet_name, data_dict):
     ws = sh.worksheet(worksheet_name)
     ws.append_row(list(data_dict.values()))
 
-def update_daily_summary_sheet():
+# ==========================================
+# ロジック関数 (TDEE計算 & サマリー更新)
+# ==========================================
+def calculate_bmr(weight, height, age, gender):
+    """Mifflin-St Jeor式による基礎代謝計算"""
+    if gender == "男性":
+        return (10 * weight) + (6.25 * height) - (5 * age) + 5
+    else:
+        return (10 * weight) + (6.25 * height) - (5 * age) - 161
+
+def update_daily_summary_sheet(base_metabolism):
     df_w = load_data(WS_WORKOUT)
     df_m = load_data(WS_MEAL)
     summary_data = {}
     
+    # 筋トレ消費
     if not df_w.empty:
         df_w['Burned_Cal'] = pd.to_numeric(df_w['Burned_Cal'], errors='coerce').fillna(0)
         daily_workout = df_w.groupby('Day')['Burned_Cal'].sum().to_dict()
         for day, cal in daily_workout.items():
-            if day not in summary_data: summary_data[day] = {'Intake': 0, 'Burned': 0, 'P': 0, 'F': 0, 'C': 0}
-            summary_data[day]['Burned'] = cal
+            if day not in summary_data: 
+                summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
+            summary_data[day]['Workout_Burn'] = cal
 
+    # 食事摂取
     if not df_m.empty:
         cols = ['Calories', 'Protein', 'Fat', 'Carbs']
         for c in cols: df_m[c] = pd.to_numeric(df_m[c], errors='coerce').fillna(0)
         daily_meal = df_m.groupby('Day')[cols].sum()
         for day, row in daily_meal.iterrows():
-            if day not in summary_data: summary_data[day] = {'Intake': 0, 'Burned': 0, 'P': 0, 'F': 0, 'C': 0}
+            if day not in summary_data: 
+                summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
             summary_data[day]['Intake'] += row['Calories']
             summary_data[day]['P'] += row['Protein']
             summary_data[day]['F'] += row['Fat']
@@ -108,26 +113,24 @@ def update_daily_summary_sheet():
 
     rows = []
     for day, data in summary_data.items():
-        balance = data['Intake'] - data['Burned']
-        rows.append([day, int(data['Intake']), int(data['Burned']), int(balance), 
-                     round(data['P'], 1), round(data['F'], 1), round(data['C'], 1)])
+        # 総消費 = 基礎代謝(活動含む) + 筋トレ消費
+        total_out = base_metabolism + data['Workout_Burn']
+        balance = data['Intake'] - total_out
+        
+        rows.append([day, int(data['Intake']), int(total_out), int(balance), 
+                     round(data['P'], 1), round(data['F'], 1), round(data['C'], 1), int(base_metabolism)])
     
     if rows:
-        df_sum = pd.DataFrame(rows, columns=["Date", "Intake", "Burned", "Balance", "P", "F", "C"])
+        df_sum = pd.DataFrame(rows, columns=["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
         df_sum = df_sum.sort_values("Date", ascending=False)
+        
         sh = connect_to_sheet()
         ws = sh.worksheet(WS_SUMMARY)
         ws.clear()
-        ws.append_row(["Date", "Intake", "Burned", "Balance", "P", "F", "C"])
+        ws.append_row(["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
         ws.append_rows(df_sum.values.tolist())
         return df_sum
     return pd.DataFrame()
-
-# ==========================================
-# 関数定義: 計算・AI
-# ==========================================
-def calculate_calories(weight_kg, duration_min, mets=6.0):
-    return round(mets * weight_kg * (duration_min / 60) * 1.05, 1)
 
 def analyze_meal_image(image):
     model = genai.GenerativeModel('gemini-flash-latest')
@@ -152,78 +155,148 @@ def analyze_meal_image(image):
 # ==========================================
 # UI構築
 # ==========================================
-st.set_page_config(layout="wide", page_title="Bio-Log Cloud")
-st.title("☁️ Bio-Log Cloud")
+st.set_page_config(layout="wide", page_title="Bio-Log Cloud V2")
+st.title("☁️ Bio-Log Cloud V2")
 
 if 'sheet_init' not in st.session_state:
-    with st.spinner("データベースに接続中..."):
-        init_sheets()
-        st.session_state.sheet_init = True
+    init_sheets()
+    st.session_state.sheet_init = True
 
+# --- サイドバー: 身体組成 & 代謝設定 ---
 with st.sidebar:
-    st.header("⚙️ 設定")
-    body_weight = st.number_input("体重 (kg)", value=65.0, step=0.1)
-
-st.subheader("📅 日次レポート")
-if st.button("🔄 最新に更新"):
-    with st.spinner("集計中..."):
-        summary_df = update_daily_summary_sheet()
-else:
-    summary_df = load_data(WS_SUMMARY)
-
-if not summary_df.empty:
-    st.dataframe(
-        summary_df,
-        column_config={
-            "Date": st.column_config.TextColumn("日付", frozen=True),
-            "Balance": st.column_config.ProgressColumn("収支", format="%d kcal", min_value=-1000, max_value=1000),
-        },
-        use_container_width=True, hide_index=True
-    )
-
-st.divider()
-tab1, tab2 = st.tabs(["🏋️ 筋トレ入力", "🥗 食事入力"])
-
-with tab1:
-    EXERCISE_LIST = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "ランニング", "その他"]
-    ex_name = st.selectbox("種目", EXERCISE_LIST)
-    c1, c2 = st.columns(2)
-    weight = c1.number_input("重量(kg)", 60.0)
-    reps = c1.number_input("回数", 10)
-    sets = c2.number_input("セット", 3)
-    duration = c2.number_input("時間(分)", 10)
-    burned = calculate_calories(body_weight, duration)
+    st.header("🧬 ユーザー・代謝設定")
+    gender = st.radio("性別", ["男性", "女性"])
+    age = st.number_input("年齢", 21, 100, 21)
+    height = st.number_input("身長 (cm)", 170.0)
+    weight = st.number_input("体重 (kg)", 65.0)
     
-    if st.button("記録をクラウドに保存", type="primary"):
-        data = {
-            "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "Day": datetime.now().strftime("%Y-%m-%d"),
-            "Exercise": ex_name, "Weight": weight, "Reps": reps, 
-            "Sets": sets, "Duration": duration, "Burned_Cal": burned
-        }
-        with st.spinner("保存中..."):
-            save_to_sheet(WS_WORKOUT, data)
-            update_daily_summary_sheet()
-            st.success("保存完了！")
-            st.rerun()
+    st.subheader("生活活動レベル")
+    activity_level = st.selectbox(
+        "日常の運動強度", 
+        ("低い (デスクワーク・勉強)", "普通 (通学・立ち仕事)", "高い (肉体労働・部活)"),
+        index=1
+    )
+    
+    # 活動係数
+    if "低い" in activity_level: factor = 1.2
+    elif "普通" in activity_level: factor = 1.375
+    else: factor = 1.55
+    
+    # 基礎代謝のみ
+    bmr_pure = calculate_bmr(weight, height, age, gender)
+    # 活動代謝込み（筋トレ除くベースライン）
+    daily_base_burn = bmr_pure * factor
+    
+    st.markdown("---")
+    st.metric("基礎代謝 (BMR)", f"{int(bmr_pure)} kcal")
+    st.metric("1日の基準消費 (TDEE)", f"{int(daily_base_burn)} kcal", help="筋トレ以外の生活活動を含みます")
 
+# --- メインエリア ---
+tab1, tab2, tab3 = st.tabs(["📊 カロリー収支", "📈 漸進性負荷分析", "📝 記録入力"])
+
+# Tab 1: 収支レポート
+with tab1:
+    if st.button("🔄 最新データに更新"):
+        with st.spinner("TDEEを含めて再計算中..."):
+            summary_df = update_daily_summary_sheet(daily_base_burn)
+    else:
+        summary_df = load_data(WS_SUMMARY)
+
+    if not summary_df.empty:
+        st.dataframe(
+            summary_df,
+            column_config={
+                "Date": st.column_config.TextColumn("日付", frozen=True),
+                "Total_Out": st.column_config.NumberColumn("総消費 (基礎+運動)", format="%d kcal"),
+                "Balance": st.column_config.ProgressColumn("収支", format="%d kcal", min_value=-1000, max_value=1000),
+            },
+            use_container_width=True, hide_index=True
+        )
+    else:
+        st.info("データがありません。")
+
+# Tab 2: 漸進性負荷分析
 with tab2:
-    uploaded_file = st.file_uploader("食事画像", type=["jpg", "png"])
-    if uploaded_file and st.button("解析してクラウド保存"):
-        with st.spinner('AI解析 & 送信中...'):
-            image = Image.open(uploaded_file)
-            result = analyze_meal_image(image)
-            if "error" not in result:
-                data = {
-                    "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "Day": datetime.now().strftime("%Y-%m-%d"),
-                    "Menu_Name": result.get('menu_name'),
-                    "Calories": result.get('calories'),
-                    "Protein": result.get('protein'),
-                    "Fat": result.get('fat'),
-                    "Carbs": result.get('carbs')
-                }
-                save_to_sheet(WS_MEAL, data)
-                update_daily_summary_sheet()
-                st.success(f"保存: {result.get('menu_name')}")
-                st.rerun()
+    st.subheader("💪 Progressive Overload Tracker")
+    df_w = load_data(WS_WORKOUT)
+    
+    if not df_w.empty:
+        # 文字列型を数値に変換
+        for col in ['Weight', 'Reps', 'Sets', 'Volume']:
+             df_w[col] = pd.to_numeric(df_w[col], errors='coerce').fillna(0)
+
+        # 種目選択
+        unique_exercises = df_w['Exercise'].unique()
+        selected_ex = st.selectbox("分析する種目を選択", unique_exercises)
+        
+        # 該当種目のデータのみ抽出
+        df_chart = df_w[df_w['Exercise'] == selected_ex].sort_values("Date")
+        
+        if not df_chart.empty:
+            # グラフ描画 (Volumeの推移)
+            c = alt.Chart(df_chart).mark_line(point=True).encode(
+                x='Date',
+                y=alt.Y('Volume', title='総負荷量 (kg×reps×sets)'),
+                tooltip=['Date', 'Weight', 'Reps', 'Sets', 'Volume']
+            ).properties(title=f"{selected_ex} のボリューム推移")
+            
+            st.altair_chart(c, use_container_width=True)
+            
+            # 最大重量の推移も表示
+            c2 = alt.Chart(df_chart).mark_line(point=True, color='orange').encode(
+                x='Date',
+                y=alt.Y('Weight', title='扱う重量 (kg)', scale=alt.Scale(zero=False)),
+                tooltip=['Date', 'Weight']
+            ).properties(title=f"{selected_ex} の重量推移")
+            st.altair_chart(c2, use_container_width=True)
+        else:
+            st.warning("この種目のデータはまだありません。")
+
+# Tab 3: 入力フォーム
+with tab3:
+    col_w, col_m = st.columns(2)
+    
+    # 筋トレ入力
+    with col_w:
+        st.subheader("🏋️ 筋トレ")
+        ex_list = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "アームカール", "ランニング"]
+        ex_name = st.selectbox("種目", ex_list)
+        weight_in = st.number_input("重量(kg)", 60.0, step=2.5)
+        reps_in = st.number_input("回数", 10, step=1)
+        sets_in = st.number_input("セット", 3, step=1)
+        duration_in = st.number_input("時間(分)", 10, step=5)
+        
+        # METs計算
+        workout_burn = round(6.0 * weight * (duration_in / 60) * 1.05, 1)
+        # ボリューム計算 (Progressive Overload指標)
+        volume = weight_in * reps_in * sets_in
+        
+        if st.button("筋トレを保存", type="primary"):
+            data = {
+                "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "Day": datetime.now().strftime("%Y-%m-%d"),
+                "Exercise": ex_name, "Weight": weight_in, "Reps": reps_in, 
+                "Sets": sets_in, "Duration": duration_in, "Burned_Cal": workout_burn,
+                "Volume": volume
+            }
+            save_to_sheet(WS_WORKOUT, data)
+            update_daily_summary_sheet(daily_base_burn)
+            st.success(f"保存完了! Volume: {volume}")
+
+    # 食事入力
+    with col_m:
+        st.subheader("🥗 食事")
+        img_file = st.file_uploader("画像", type=["jpg", "png"])
+        if img_file and st.button("解析して保存"):
+            with st.spinner('解析中...'):
+                res = analyze_meal_image(Image.open(img_file))
+                if "error" not in res:
+                    data = {
+                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "Day": datetime.now().strftime("%Y-%m-%d"),
+                        "Menu": res.get('menu_name'), "Cal": res.get('calories'),
+                        "P": res.get('protein'), "F": res.get('fat'), "C": res.get('carbs')
+                    }
+                    save_to_sheet(WS_MEAL, data)
+                    update_daily_summary_sheet(daily_base_burn)
+                    st.success(f"保存: {res.get('menu_name')}")
