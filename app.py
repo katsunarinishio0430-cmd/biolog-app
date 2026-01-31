@@ -4,10 +4,10 @@ import google.generativeai as genai
 from PIL import Image
 import json
 import os
-from datetime import datetime
+from datetime import datetime, date
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import altair as alt # グラフ描画用
+import altair as alt
 
 # ==========================================
 # 設定: APIキー & シート設定
@@ -75,7 +75,7 @@ def save_to_sheet(worksheet_name, data_dict):
     ws.append_row(list(data_dict.values()))
 
 # ==========================================
-# ロジック関数 (TDEE計算 & サマリー更新)
+# ロジック関数
 # ==========================================
 def calculate_bmr(weight, height, age, gender):
     """Mifflin-St Jeor式による基礎代謝計算"""
@@ -113,10 +113,8 @@ def update_daily_summary_sheet(base_metabolism):
 
     rows = []
     for day, data in summary_data.items():
-        # 総消費 = 基礎代謝(活動含む) + 筋トレ消費
         total_out = base_metabolism + data['Workout_Burn']
         balance = data['Intake'] - total_out
-        
         rows.append([day, int(data['Intake']), int(total_out), int(balance), 
                      round(data['P'], 1), round(data['F'], 1), round(data['C'], 1), int(base_metabolism)])
     
@@ -166,9 +164,15 @@ if 'sheet_init' not in st.session_state:
 with st.sidebar:
     st.header("🧬 ユーザー・代謝設定")
     gender = st.radio("性別", ["男性", "女性"])
-    age = st.number_input("年齢", 21, 100, 21)
-    height = st.number_input("身長 (cm)", 170.0)
-    weight = st.number_input("体重 (kg)", 65.0)
+    
+    # 修正箇所: min_value, max_value, value の順で指定、またはキーワード引数を使うことで制限を解除
+    age = st.number_input("年齢", min_value=10, max_value=100, value=21)
+    
+    # ここを修正しました！ 100cm〜250cmの間で入力可能に
+    height = st.number_input("身長 (cm)", min_value=100.0, max_value=250.0, value=170.0, step=0.1)
+    
+    # ここも修正！ 30kg〜200kgの間で入力可能に
+    weight = st.number_input("体重 (kg)", min_value=30.0, max_value=200.0, value=65.0, step=0.1)
     
     st.subheader("生活活動レベル")
     activity_level = st.selectbox(
@@ -177,14 +181,11 @@ with st.sidebar:
         index=1
     )
     
-    # 活動係数
     if "低い" in activity_level: factor = 1.2
     elif "普通" in activity_level: factor = 1.375
     else: factor = 1.55
     
-    # 基礎代謝のみ
     bmr_pure = calculate_bmr(weight, height, age, gender)
-    # 活動代謝込み（筋トレ除くベースライン）
     daily_base_burn = bmr_pure * factor
     
     st.markdown("---")
@@ -194,7 +195,6 @@ with st.sidebar:
 # --- メインエリア ---
 tab1, tab2, tab3 = st.tabs(["📊 カロリー収支", "📈 漸進性負荷分析", "📝 記録入力"])
 
-# Tab 1: 収支レポート
 with tab1:
     if st.button("🔄 最新データに更新"):
         with st.spinner("TDEEを含めて再計算中..."):
@@ -212,37 +212,28 @@ with tab1:
             },
             use_container_width=True, hide_index=True
         )
-    else:
-        st.info("データがありません。")
 
-# Tab 2: 漸進性負荷分析
 with tab2:
     st.subheader("💪 Progressive Overload Tracker")
     df_w = load_data(WS_WORKOUT)
     
     if not df_w.empty:
-        # 文字列型を数値に変換
         for col in ['Weight', 'Reps', 'Sets', 'Volume']:
              df_w[col] = pd.to_numeric(df_w[col], errors='coerce').fillna(0)
 
-        # 種目選択
         unique_exercises = df_w['Exercise'].unique()
         selected_ex = st.selectbox("分析する種目を選択", unique_exercises)
         
-        # 該当種目のデータのみ抽出
         df_chart = df_w[df_w['Exercise'] == selected_ex].sort_values("Date")
         
         if not df_chart.empty:
-            # グラフ描画 (Volumeの推移)
             c = alt.Chart(df_chart).mark_line(point=True).encode(
                 x='Date',
                 y=alt.Y('Volume', title='総負荷量 (kg×reps×sets)'),
                 tooltip=['Date', 'Weight', 'Reps', 'Sets', 'Volume']
             ).properties(title=f"{selected_ex} のボリューム推移")
-            
             st.altair_chart(c, use_container_width=True)
             
-            # 最大重量の推移も表示
             c2 = alt.Chart(df_chart).mark_line(point=True, color='orange').encode(
                 x='Date',
                 y=alt.Y('Weight', title='扱う重量 (kg)', scale=alt.Scale(zero=False)),
@@ -252,11 +243,22 @@ with tab2:
         else:
             st.warning("この種目のデータはまだありません。")
 
-# Tab 3: 入力フォーム
 with tab3:
+    # 日付と時刻の入力欄を追加
+    st.subheader("📅 日時設定")
+    c_date, c_time = st.columns(2)
+    input_date = c_date.date_input("日付", date.today())
+    input_time = c_time.time_input("時間", datetime.now().time())
+    
+    # 選択された日時を結合して文字列にする
+    target_datetime = datetime.combine(input_date, input_time)
+    formatted_date = target_datetime.strftime("%Y-%m-%d %H:%M")
+    formatted_day = target_datetime.strftime("%Y-%m-%d")
+
+    st.divider()
+    
     col_w, col_m = st.columns(2)
     
-    # 筋トレ入力
     with col_w:
         st.subheader("🏋️ 筋トレ")
         ex_list = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "アームカール", "ランニング"]
@@ -266,24 +268,21 @@ with tab3:
         sets_in = st.number_input("セット", 3, step=1)
         duration_in = st.number_input("時間(分)", 10, step=5)
         
-        # METs計算
         workout_burn = round(6.0 * weight * (duration_in / 60) * 1.05, 1)
-        # ボリューム計算 (Progressive Overload指標)
         volume = weight_in * reps_in * sets_in
         
         if st.button("筋トレを保存", type="primary"):
             data = {
-                "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "Day": datetime.now().strftime("%Y-%m-%d"),
+                "Date": formatted_date, # 手動入力した日時を使用
+                "Day": formatted_day,
                 "Exercise": ex_name, "Weight": weight_in, "Reps": reps_in, 
                 "Sets": sets_in, "Duration": duration_in, "Burned_Cal": workout_burn,
                 "Volume": volume
             }
             save_to_sheet(WS_WORKOUT, data)
             update_daily_summary_sheet(daily_base_burn)
-            st.success(f"保存完了! Volume: {volume}")
+            st.success(f"保存完了! ({formatted_date})")
 
-    # 食事入力
     with col_m:
         st.subheader("🥗 食事")
         img_file = st.file_uploader("画像", type=["jpg", "png"])
@@ -292,11 +291,11 @@ with tab3:
                 res = analyze_meal_image(Image.open(img_file))
                 if "error" not in res:
                     data = {
-                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "Day": datetime.now().strftime("%Y-%m-%d"),
+                        "Date": formatted_date, # 手動入力した日時を使用
+                        "Day": formatted_day,
                         "Menu": res.get('menu_name'), "Cal": res.get('calories'),
                         "P": res.get('protein'), "F": res.get('fat'), "C": res.get('carbs')
                     }
                     save_to_sheet(WS_MEAL, data)
                     update_daily_summary_sheet(daily_base_burn)
-                    st.success(f"保存: {res.get('menu_name')}")
+                    st.success(f"保存: {res.get('menu_name')} ({formatted_date})")
