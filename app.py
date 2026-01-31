@@ -28,7 +28,7 @@ WS_MEAL = "meal_log"
 WS_SUMMARY = "daily_summary"
 
 # ==========================================
-# データ操作関数
+# データ操作関数 (高速化対応)
 # ==========================================
 def connect_to_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -60,6 +60,9 @@ def init_sheets():
     except Exception as e:
         st.error(f"接続エラー: {e}")
 
+# ★重要: キャッシュ機能を追加 (ttl=60秒)
+# これにより、時間を変えるたびに通信が発生するのを防ぎます
+@st.cache_data(ttl=60)
 def load_data(worksheet_name):
     try:
         sh = connect_to_sheet()
@@ -73,23 +76,25 @@ def save_to_sheet(worksheet_name, data_dict):
     sh = connect_to_sheet()
     ws = sh.worksheet(worksheet_name)
     ws.append_row(list(data_dict.values()))
+    # 保存したらキャッシュを削除して、即座に新しいデータを反映させる
+    load_data.clear()
 
 # ==========================================
 # ロジック関数
 # ==========================================
 def calculate_bmr(weight, height, age, gender):
-    """Mifflin-St Jeor式による基礎代謝計算"""
     if gender == "男性":
         return (10 * weight) + (6.25 * height) - (5 * age) + 5
     else:
         return (10 * weight) + (6.25 * height) - (5 * age) - 161
 
 def update_daily_summary_sheet(base_metabolism):
+    # ここではキャッシュを使わず直接読み込むか、キャッシュをクリアしてから呼ぶ
+    load_data.clear() 
     df_w = load_data(WS_WORKOUT)
     df_m = load_data(WS_MEAL)
     summary_data = {}
     
-    # 筋トレ消費
     if not df_w.empty:
         df_w['Burned_Cal'] = pd.to_numeric(df_w['Burned_Cal'], errors='coerce').fillna(0)
         daily_workout = df_w.groupby('Day')['Burned_Cal'].sum().to_dict()
@@ -98,7 +103,6 @@ def update_daily_summary_sheet(base_metabolism):
                 summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
             summary_data[day]['Workout_Burn'] = cal
 
-    # 食事摂取
     if not df_m.empty:
         cols = ['Calories', 'Protein', 'Fat', 'Carbs']
         for c in cols: df_m[c] = pd.to_numeric(df_m[c], errors='coerce').fillna(0)
@@ -160,18 +164,12 @@ if 'sheet_init' not in st.session_state:
     init_sheets()
     st.session_state.sheet_init = True
 
-# --- サイドバー: 身体組成 & 代謝設定 ---
+# --- サイドバー ---
 with st.sidebar:
     st.header("🧬 ユーザー・代謝設定")
     gender = st.radio("性別", ["男性", "女性"])
-    
-    # 修正箇所: min_value, max_value, value の順で指定、またはキーワード引数を使うことで制限を解除
     age = st.number_input("年齢", min_value=10, max_value=100, value=21)
-    
-    # ここを修正しました！ 100cm〜250cmの間で入力可能に
     height = st.number_input("身長 (cm)", min_value=100.0, max_value=250.0, value=170.0, step=0.1)
-    
-    # ここも修正！ 30kg〜200kgの間で入力可能に
     weight = st.number_input("体重 (kg)", min_value=30.0, max_value=200.0, value=65.0, step=0.1)
     
     st.subheader("生活活動レベル")
@@ -197,6 +195,8 @@ tab1, tab2, tab3 = st.tabs(["📊 カロリー収支", "📈 漸進性負荷分�
 
 with tab1:
     if st.button("🔄 最新データに更新"):
+        # 強制的にリロード
+        load_data.clear()
         with st.spinner("TDEEを含めて再計算中..."):
             summary_df = update_daily_summary_sheet(daily_base_burn)
     else:
@@ -244,13 +244,12 @@ with tab2:
             st.warning("この種目のデータはまだありません。")
 
 with tab3:
-    # 日付と時刻の入力欄を追加
     st.subheader("📅 日時設定")
+    # ここはグローバル設定のままにするが、キャッシュのおかげで軽く動く
     c_date, c_time = st.columns(2)
     input_date = c_date.date_input("日付", date.today())
     input_time = c_time.time_input("時間", datetime.now().time())
     
-    # 選択された日時を結合して文字列にする
     target_datetime = datetime.combine(input_date, input_time)
     formatted_date = target_datetime.strftime("%Y-%m-%d %H:%M")
     formatted_day = target_datetime.strftime("%Y-%m-%d")
@@ -260,28 +259,33 @@ with tab3:
     col_w, col_m = st.columns(2)
     
     with col_w:
-        st.subheader("🏋️ 筋トレ")
-        ex_list = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "アームカール", "ランニング"]
-        ex_name = st.selectbox("種目", ex_list)
-        weight_in = st.number_input("重量(kg)", 60.0, step=2.5)
-        reps_in = st.number_input("回数", 10, step=1)
-        sets_in = st.number_input("セット", 3, step=1)
-        duration_in = st.number_input("時間(分)", 10, step=5)
-        
-        workout_burn = round(6.0 * weight * (duration_in / 60) * 1.05, 1)
-        volume = weight_in * reps_in * sets_in
-        
-        if st.button("筋トレを保存", type="primary"):
-            data = {
-                "Date": formatted_date, # 手動入力した日時を使用
-                "Day": formatted_day,
-                "Exercise": ex_name, "Weight": weight_in, "Reps": reps_in, 
-                "Sets": sets_in, "Duration": duration_in, "Burned_Cal": workout_burn,
-                "Volume": volume
-            }
-            save_to_sheet(WS_WORKOUT, data)
-            update_daily_summary_sheet(daily_base_burn)
-            st.success(f"保存完了! ({formatted_date})")
+        # フォーム機能を追加！これで入力中は画面がリロードされません
+        with st.form("workout_form"):
+            st.subheader("🏋️ 筋トレ")
+            ex_list = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "アームカール", "ランニング"]
+            ex_name = st.selectbox("種目", ex_list)
+            weight_in = st.number_input("重量(kg)", 60.0, step=2.5)
+            reps_in = st.number_input("回数", 10, step=1)
+            sets_in = st.number_input("セット", 3, step=1)
+            duration_in = st.number_input("時間(分)", 10, step=5)
+            
+            # 保存ボタンをフォーム内に配置
+            submitted_w = st.form_submit_button("筋トレを保存", type="primary")
+            
+            if submitted_w:
+                workout_burn = round(6.0 * weight * (duration_in / 60) * 1.05, 1)
+                volume = weight_in * reps_in * sets_in
+                
+                data = {
+                    "Date": formatted_date,
+                    "Day": formatted_day,
+                    "Exercise": ex_name, "Weight": weight_in, "Reps": reps_in, 
+                    "Sets": sets_in, "Duration": duration_in, "Burned_Cal": workout_burn,
+                    "Volume": volume
+                }
+                save_to_sheet(WS_WORKOUT, data)
+                update_daily_summary_sheet(daily_base_burn)
+                st.success(f"保存完了! ({formatted_date})")
 
     with col_m:
         st.subheader("🥗 食事")
@@ -291,7 +295,7 @@ with tab3:
                 res = analyze_meal_image(Image.open(img_file))
                 if "error" not in res:
                     data = {
-                        "Date": formatted_date, # 手動入力した日時を使用
+                        "Date": formatted_date,
                         "Day": formatted_day,
                         "Menu": res.get('menu_name'), "Cal": res.get('calories'),
                         "P": res.get('protein'), "F": res.get('fat'), "C": res.get('carbs')
