@@ -4,7 +4,7 @@ import google.generativeai as genai
 from PIL import Image
 import json
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import altair as alt
@@ -60,8 +60,6 @@ def init_sheets():
     except Exception as e:
         st.error(f"接続エラー: {e}")
 
-# ★重要: キャッシュ機能を追加 (ttl=60秒)
-# これにより、時間を変えるたびに通信が発生するのを防ぎます
 @st.cache_data(ttl=60)
 def load_data(worksheet_name):
     try:
@@ -76,7 +74,6 @@ def save_to_sheet(worksheet_name, data_dict):
     sh = connect_to_sheet()
     ws = sh.worksheet(worksheet_name)
     ws.append_row(list(data_dict.values()))
-    # 保存したらキャッシュを削除して、即座に新しいデータを反映させる
     load_data.clear()
 
 # ==========================================
@@ -89,7 +86,6 @@ def calculate_bmr(weight, height, age, gender):
         return (10 * weight) + (6.25 * height) - (5 * age) - 161
 
 def update_daily_summary_sheet(base_metabolism):
-    # ここではキャッシュを使わず直接読み込むか、キャッシュをクリアしてから呼ぶ
     load_data.clear() 
     df_w = load_data(WS_WORKOUT)
     df_m = load_data(WS_MEAL)
@@ -195,7 +191,6 @@ tab1, tab2, tab3 = st.tabs(["📊 カロリー収支", "📈 漸進性負荷分�
 
 with tab1:
     if st.button("🔄 最新データに更新"):
-        # 強制的にリロード
         load_data.clear()
         with st.spinner("TDEEを含めて再計算中..."):
             summary_df = update_daily_summary_sheet(daily_base_burn)
@@ -245,10 +240,20 @@ with tab2:
 
 with tab3:
     st.subheader("📅 日時設定")
-    # ここはグローバル設定のままにするが、キャッシュのおかげで軽く動く
+    
+    # ★ここが修正ポイント: 日本時間(JST)を取得して初期値にする
+    JST = timezone(timedelta(hours=9), 'JST')
+    
+    # Session Stateを使って「最初に開いた時の時間」を保存し、勝手に更新されないようにする
+    if 'default_date' not in st.session_state:
+        st.session_state.default_date = datetime.now(JST).date()
+    if 'default_time' not in st.session_state:
+        st.session_state.default_time = datetime.now(JST).time()
+
     c_date, c_time = st.columns(2)
-    input_date = c_date.date_input("日付", date.today())
-    input_time = c_time.time_input("時間", datetime.now().time())
+    input_date = c_date.date_input("日付", value=st.session_state.default_date)
+    # 時間の入力を、ユーザーが変更しない限り固定
+    input_time = c_time.time_input("時間", value=st.session_state.default_time)
     
     target_datetime = datetime.combine(input_date, input_time)
     formatted_date = target_datetime.strftime("%Y-%m-%d %H:%M")
@@ -259,7 +264,6 @@ with tab3:
     col_w, col_m = st.columns(2)
     
     with col_w:
-        # フォーム機能を追加！これで入力中は画面がリロードされません
         with st.form("workout_form"):
             st.subheader("🏋️ 筋トレ")
             ex_list = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "アームカール", "ランニング"]
@@ -269,7 +273,6 @@ with tab3:
             sets_in = st.number_input("セット", 3, step=1)
             duration_in = st.number_input("時間(分)", 10, step=5)
             
-            # 保存ボタンをフォーム内に配置
             submitted_w = st.form_submit_button("筋トレを保存", type="primary")
             
             if submitted_w:
@@ -303,3 +306,4 @@ with tab3:
                     save_to_sheet(WS_MEAL, data)
                     update_daily_summary_sheet(daily_base_burn)
                     st.success(f"保存: {res.get('menu_name')} ({formatted_date})")
+                    
