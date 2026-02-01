@@ -12,9 +12,9 @@ import altair as alt
 # ==========================================
 # 設定: APIキー & シート設定
 # ==========================================
-# ご指定のAPIキーを設定
 DEFAULT_API_KEY = "AIzaSyBOlQW_7uW0g62f_NujUBlMDpWtpefHidc" 
 
+# Secretsの確認と設定
 try:
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -92,7 +92,7 @@ def save_to_sheet(worksheet_name, data_dict):
     save_rows_to_sheet(worksheet_name, [data_dict])
 
 # ==========================================
-# ロジック関数
+# ロジック関数 (AI & 計算)
 # ==========================================
 def calculate_bmr(weight, height, age, gender):
     if gender == "男性":
@@ -149,11 +149,12 @@ def update_daily_summary_sheet(base_metabolism):
         return df_sum
     return pd.DataFrame()
 
+# ★修正版: Gemini 1.5 Flash を使用し、JSONモードを強制する
 def analyze_meal_image(image):
-    model = genai.GenerativeModel('gemini-flash-latest')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = """
     この食事画像を解析し、栄養素を推定してください。
-    必ず以下のJSONフォーマットのみを出力してください。
+    必ず以下のJSONキーのみを持つJSONデータを出力してください。
     {
       "menu_name": "メニュー名",
       "calories": 整数(kcal),
@@ -163,22 +164,24 @@ def analyze_meal_image(image):
     }
     """
     try:
-        response = model.generate_content([prompt, image])
-        text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(text)
+        response = model.generate_content(
+            [prompt, image],
+            generation_config={"response_mime_type": "application/json"}
+        )
+        return json.loads(response.text)
     except Exception as e:
         return {"error": str(e)}
 
-# ★新機能: テキストから栄養素を推定する関数
+# ★修正版: テキスト解析も強化
 def estimate_nutrition_from_text(text):
-    model = genai.GenerativeModel('gemini-flash-latest')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
     以下の食事メニューの栄養素（カロリー、PFC）を一般的な基準で推定してください。
     メニュー名: {text}
     
-    必ず以下のJSONフォーマットのみを出力してください。余計な文章は不要です。
+    必ず以下のJSONキーのみを持つJSONデータを出力してください。
     {{
-      "menu_name": "メニュー名（補完があれば詳しく）",
+      "menu_name": "メニュー名",
       "calories": 整数(kcal),
       "protein": 少数(g),
       "fat": 少数(g),
@@ -186,9 +189,11 @@ def estimate_nutrition_from_text(text):
     }}
     """
     try:
-        response = model.generate_content(prompt)
-        text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(text)
+        response = model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        return json.loads(response.text)
     except Exception as e:
         return {"error": str(e)}
 
@@ -219,23 +224,19 @@ def generate_advice(days=7):
 
     prompt = f"""
     あなたは非常に優秀で、かつ科学的根拠（Evidence-Based）を重視する厳格なパーソナルトレーナー兼栄養士です。
-    ユーザーは生物学を専攻する学生であり、曖昧な励ましよりも「論理的な分析」と「具体的な改善点」を求めています。
     以下のデータに基づき、現状の評価と次週のアクションプランをレポートしてください。
 
-    ### ユーザーのデータ
+    ### ユーザーデータ
     {workout_text}
-
     {nutrition_text}
 
-    ### レポートの要件
-    1. **トレーニング分析**: 漸進性負荷の原則（Progressive Overload）の観点から、負荷設定は適切か？ボリュームは足りているか？特定部位に偏りはないか？厳しく評価してください。
-    2. **栄養分析**: カロリー収支とPFCバランスは、筋肥大（または目的）に対して適切か？
-    3. **アクションプラン**: 次回行うべき具体的なトレーニングの修正点（重量やセット数など）と食事の改善案。
-
-    回答はマークダウン形式で見やすく記述してください。
+    ### レポート要件 (Markdown)
+    1. **トレーニング分析**: 漸進性負荷は達成できているか？部位の偏りは？
+    2. **栄養分析**: カロリー収支とPFCバランスの評価。
+    3. **アクションプラン**: 具体的な修正点（種目、重量、食事内容）。
     """
     
-    model = genai.GenerativeModel('gemini-flash-latest')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     try:
         response = model.generate_content(prompt)
         return response.text
@@ -432,7 +433,6 @@ with tab3:
     with col_m:
         st.subheader("🥗 食事")
         
-        # 1. 自動入力ツール (画像 or テキスト)
         input_method = st.radio("入力方法", ["📸 画像解析", "✏️ テキスト検索", "🖐️ 完全手動"], horizontal=True)
         
         if input_method == "📸 画像解析":
@@ -453,7 +453,6 @@ with tab3:
                         st.error(f"解析エラー: {res.get('error')}")
 
         elif input_method == "✏️ テキスト検索":
-            # テキスト入力欄とボタン
             text_query = st.text_input("食べたものを入力 (例: 牛丼 並盛, プロテインバー)", placeholder="例: 鶏むね肉のサラダ")
             if st.button("栄養素を自動推測"):
                 if text_query:
@@ -469,14 +468,14 @@ with tab3:
                             }
                             st.success(f"推測完了: {res.get('menu_name')}")
                         else:
-                            st.error("エラーが発生しました。")
+                            # 修正箇所: エラー内容を表示するように変更
+                            st.error(f"エラーが発生しました: {res.get('error')}")
                 else:
                     st.warning("メニュー名を入力してください。")
 
         st.divider()
         st.write("▼ 内容を確認・修正して保存")
 
-        # 2. 確認・修正・手動入力フォーム
         with st.form("meal_save_form"):
             menu_name = st.text_input("メニュー名", value=st.session_state.meal_form_data["menu"])
             cal_in = st.number_input("カロリー (kcal)", value=st.session_state.meal_form_data["cal"])
