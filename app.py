@@ -64,7 +64,6 @@ def init_sheets():
                 ws = sh.add_worksheet(title=title, rows=100, cols=20)
                 ws.append_row(header)
         
-        # Notesカラムを追加
         create_if_missing(WS_WORKOUT, ["Date", "Day", "Exercise", "Weight", "Reps", "Sets", "Duration", "Burned_Cal", "Volume", "Notes"])
         create_if_missing(WS_MEAL, ["Date", "Day", "Menu_Name", "Calories", "Protein", "Fat", "Carbs"])
         create_if_missing(WS_SUMMARY, ["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
@@ -169,6 +168,61 @@ def analyze_meal_image(image):
     except Exception as e:
         return {"error": str(e)}
 
+# ★新機能: AIアドバイス生成機能
+def generate_advice(days=7):
+    # データの読み込み
+    df_w = load_data(WS_WORKOUT)
+    df_s = load_data(WS_SUMMARY)
+    
+    # 直近N日間のデータをテキスト化
+    workout_text = "データなし"
+    nutrition_text = "データなし"
+    
+    if not df_w.empty and 'Day' in df_w.columns:
+        df_w['Day'] = pd.to_datetime(df_w['Day'])
+        recent_w = df_w[df_w['Day'] >= (datetime.now() - timedelta(days=days))]
+        if not recent_w.empty:
+            # 種目ごとの最大重量と総ボリュームを集計
+            summary = recent_w.groupby('Exercise').agg(
+                Max_Weight=('Weight', 'max'),
+                Total_Volume=('Volume', 'sum'),
+                Count=('Date', 'count')
+            ).to_string()
+            workout_text = f"【直近{days}日間のトレーニング実績】\n{summary}"
+
+    if not df_s.empty and 'Date' in df_s.columns:
+        df_s['Date'] = pd.to_datetime(df_s['Date'])
+        recent_s = df_s[df_s['Date'] >= (datetime.now() - timedelta(days=days))]
+        if not recent_s.empty:
+            summary = recent_s[['Date', 'Intake', 'Total_Out', 'Balance', 'P', 'F', 'C']].to_string(index=False)
+            nutrition_text = f"【直近{days}日間の栄養摂取状況】\n{summary}"
+
+    # プロンプトの作成
+    prompt = f"""
+    あなたは非常に優秀で、かつ科学的根拠（Evidence-Based）を重視する厳格なパーソナルトレーナー兼栄養士です。
+    ユーザーは生物学を専攻する学生であり、曖昧な励ましよりも「論理的な分析」と「具体的な改善点」を求めています。
+    以下のデータに基づき、現状の評価と次週のアクションプランをレポートしてください。
+
+    ### ユーザーのデータ
+    {workout_text}
+
+    {nutrition_text}
+
+    ### レポートの要件
+    1. **トレーニング分析**: 漸進性負荷の原則（Progressive Overload）の観点から、負荷設定は適切か？ボリュームは足りているか？特定部位に偏りはないか？厳しく評価してください。
+    2. **栄養分析**: カロリー収支とPFCバランスは、筋肥大（または目的）に対して適切か？
+    3. **アクションプラン**: 次回行うべき具体的なトレーニングの修正点（重量やセット数など）と食事の改善案。
+
+    回答はマークダウン形式で見やすく記述してください。
+    """
+    
+    model = genai.GenerativeModel('gemini-flash-latest')
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"エラーが発生しました: {str(e)}"
+
 # ==========================================
 # UI構築
 # ==========================================
@@ -182,7 +236,6 @@ if 'sheet_init' not in st.session_state:
 if 'workout_queue' not in st.session_state:
     st.session_state.workout_queue = []
 
-# 食事入力用の初期値管理
 if 'meal_form_data' not in st.session_state:
     st.session_state.meal_form_data = {
         "menu": "", "cal": 0, "p": 0.0, "f": 0.0, "c": 0.0
@@ -215,7 +268,8 @@ with st.sidebar:
     st.metric("1日の基準消費 (TDEE)", f"{int(daily_base_burn)} kcal", help="筋トレ以外の生活活動を含みます")
 
 # --- メインエリア ---
-tab1, tab2, tab3 = st.tabs(["📊 カロリー収支", "📈 漸進性負荷分析", "📝 記録入力"])
+# タブを4つに増やしました
+tab1, tab2, tab3, tab4 = st.tabs(["📊 カロリー収支", "📈 漸進性負荷分析", "📝 記録入力", "🤖 AIコーチ"])
 
 with tab1:
     if st.button("🔄 最新データに更新"):
@@ -258,7 +312,7 @@ with tab2:
                     c = alt.Chart(df_chart).mark_line(point=True).encode(
                         x='Date',
                         y=alt.Y('Volume', title='総負荷量 (kg×reps×sets)'),
-                        tooltip=['Date', 'Weight', 'Reps', 'Sets', 'Volume', 'Notes'] # Notesもツールチップに表示
+                        tooltip=['Date', 'Weight', 'Reps', 'Sets', 'Volume', 'Notes'] 
                     ).properties(title=f"{selected_ex} のボリューム推移")
                     st.altair_chart(c, use_container_width=True)
                     
@@ -320,7 +374,7 @@ with tab3:
             sets_in = st.number_input("セット", min_value=1, value=1, step=1)
             duration_in = st.number_input("時間(分)", min_value=0, value=5, step=1)
             
-            # メモ欄を追加
+            # メモ欄
             notes_in = st.text_area("メモ (フォームの修正点など)", height=80, placeholder="例: 肘が開きすぎないように注意")
             
             add_to_queue = st.form_submit_button("リストに追加 (まだ保存されません)")
@@ -335,7 +389,7 @@ with tab3:
                     "Exercise": ex_name, "Weight": weight_in, "Reps": reps_in, 
                     "Sets": sets_in, "Duration": duration_in, "Burned_Cal": workout_burn,
                     "Volume": volume,
-                    "Notes": notes_in # Notesも保存
+                    "Notes": notes_in 
                 }
                 st.session_state.workout_queue.append(item)
                 st.success(f"リストに追加: {ex_name}")
@@ -344,7 +398,6 @@ with tab3:
         
         if len(st.session_state.workout_queue) > 0:
             df_queue = pd.DataFrame(st.session_state.workout_queue)
-            # Notesも含めて表示
             st.dataframe(df_queue[["Exercise", "Weight", "Reps", "Sets", "Notes"]], hide_index=True)
             
             if st.button("クラウドに一括保存", type="primary"):
@@ -387,7 +440,6 @@ with tab3:
         st.write("▼ 内容を確認・修正して保存")
 
         # 2. 確認・修正・手動入力フォーム
-        # 画像がなくても手動で入力可能。解析後は解析結果が入っている。
         with st.form("meal_save_form"):
             menu_name = st.text_input("メニュー名", value=st.session_state.meal_form_data["menu"])
             cal_in = st.number_input("カロリー (kcal)", value=st.session_state.meal_form_data["cal"])
@@ -409,7 +461,17 @@ with tab3:
                 save_to_sheet(WS_MEAL, data)
                 update_daily_summary_sheet(daily_base_burn)
                 
-                # 保存完了後、フォームをリセット
                 st.session_state.meal_form_data = {"menu": "", "cal": 0, "p": 0.0, "f": 0.0, "c": 0.0}
                 st.success(f"保存しました: {menu_name}")
                 st.rerun()
+
+# --- Tab 4: AIコーチ ---
+with tab4:
+    st.header("🤖 AI分析レポート")
+    st.write("直近1週間のトレーニングと食事データを分析し、客観的なアドバイスを作成します。")
+    
+    if st.button("📝 レポートを作成する"):
+        with st.spinner("AIがデータを分析中..."):
+            advice = generate_advice(days=7)
+            st.markdown("---")
+            st.markdown(advice)
