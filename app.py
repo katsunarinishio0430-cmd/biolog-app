@@ -12,6 +12,7 @@ import altair as alt
 # ==========================================
 # 設定: APIキー & シート設定
 # ==========================================
+# ご指定のAPIキーを設定
 DEFAULT_API_KEY = "AIzaSyBOlQW_7uW0g62f_NujUBlMDpWtpefHidc" 
 
 try:
@@ -168,13 +169,33 @@ def analyze_meal_image(image):
     except Exception as e:
         return {"error": str(e)}
 
-# ★新機能: AIアドバイス生成機能
+# ★新機能: テキストから栄養素を推定する関数
+def estimate_nutrition_from_text(text):
+    model = genai.GenerativeModel('gemini-flash-latest')
+    prompt = f"""
+    以下の食事メニューの栄養素（カロリー、PFC）を一般的な基準で推定してください。
+    メニュー名: {text}
+    
+    必ず以下のJSONフォーマットのみを出力してください。余計な文章は不要です。
+    {{
+      "menu_name": "メニュー名（補完があれば詳しく）",
+      "calories": 整数(kcal),
+      "protein": 少数(g),
+      "fat": 少数(g),
+      "carbs": 少数(g)
+    }}
+    """
+    try:
+        response = model.generate_content(prompt)
+        text = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(text)
+    except Exception as e:
+        return {"error": str(e)}
+
 def generate_advice(days=7):
-    # データの読み込み
     df_w = load_data(WS_WORKOUT)
     df_s = load_data(WS_SUMMARY)
     
-    # 直近N日間のデータをテキスト化
     workout_text = "データなし"
     nutrition_text = "データなし"
     
@@ -182,7 +203,6 @@ def generate_advice(days=7):
         df_w['Day'] = pd.to_datetime(df_w['Day'])
         recent_w = df_w[df_w['Day'] >= (datetime.now() - timedelta(days=days))]
         if not recent_w.empty:
-            # 種目ごとの最大重量と総ボリュームを集計
             summary = recent_w.groupby('Exercise').agg(
                 Max_Weight=('Weight', 'max'),
                 Total_Volume=('Volume', 'sum'),
@@ -197,7 +217,6 @@ def generate_advice(days=7):
             summary = recent_s[['Date', 'Intake', 'Total_Out', 'Balance', 'P', 'F', 'C']].to_string(index=False)
             nutrition_text = f"【直近{days}日間の栄養摂取状況】\n{summary}"
 
-    # プロンプトの作成
     prompt = f"""
     あなたは非常に優秀で、かつ科学的根拠（Evidence-Based）を重視する厳格なパーソナルトレーナー兼栄養士です。
     ユーザーは生物学を専攻する学生であり、曖昧な励ましよりも「論理的な分析」と「具体的な改善点」を求めています。
@@ -268,7 +287,6 @@ with st.sidebar:
     st.metric("1日の基準消費 (TDEE)", f"{int(daily_base_burn)} kcal", help="筋トレ以外の生活活動を含みます")
 
 # --- メインエリア ---
-# タブを4つに増やしました
 tab1, tab2, tab3, tab4 = st.tabs(["📊 カロリー収支", "📈 漸進性負荷分析", "📝 記録入力", "🤖 AIコーチ"])
 
 with tab1:
@@ -354,7 +372,6 @@ with tab3:
         st.subheader("🏋️ 筋トレ入力")
         
         with st.form("workout_add_form"):
-            # 更新された種目リスト
             ex_categories = {
                 "胸": ["ベンチプレス", "ダンベルベンチプレス", "インクラインダンベルプレス", "ディップス"],
                 "背中": ["懸垂", "ラットプルダウン", "ロー", "ダンベルロー", "ケーブルロー"],
@@ -362,7 +379,6 @@ with tab3:
                 "肩": ["ショルダープレス", "サイドレイズ", "ケーブルサイドレイズ"],
                 "その他": ["アームカール", "ランニング"]
             }
-            # フラットなリストに変換して表示
             flat_ex_list = []
             for cat, items in ex_categories.items():
                 flat_ex_list.extend(items)
@@ -374,7 +390,6 @@ with tab3:
             sets_in = st.number_input("セット", min_value=1, value=1, step=1)
             duration_in = st.number_input("時間(分)", min_value=0, value=5, step=1)
             
-            # メモ欄
             notes_in = st.text_area("メモ (フォームの修正点など)", height=80, placeholder="例: 肘が開きすぎないように注意")
             
             add_to_queue = st.form_submit_button("リストに追加 (まだ保存されません)")
@@ -417,14 +432,15 @@ with tab3:
     with col_m:
         st.subheader("🥗 食事")
         
-        # 1. 画像アップロード & 解析
-        img_file = st.file_uploader("画像", type=["jpg", "png"])
-        if img_file:
-            if st.button("📸 AI解析開始"):
+        # 1. 自動入力ツール (画像 or テキスト)
+        input_method = st.radio("入力方法", ["📸 画像解析", "✏️ テキスト検索", "🖐️ 完全手動"], horizontal=True)
+        
+        if input_method == "📸 画像解析":
+            img_file = st.file_uploader("画像", type=["jpg", "png"])
+            if img_file and st.button("解析実行"):
                 with st.spinner('解析中...'):
                     res = analyze_meal_image(Image.open(img_file))
                     if "error" not in res:
-                        # 解析結果をセッションステート(フォームの初期値)に入れる
                         st.session_state.meal_form_data = {
                             "menu": res.get('menu_name', ''),
                             "cal": res.get('calories', 0),
@@ -432,9 +448,30 @@ with tab3:
                             "f": res.get('fat', 0.0),
                             "c": res.get('carbs', 0.0)
                         }
-                        st.success("解析完了！下のフォームで確認・修正してください。")
+                        st.success("解析完了！下で確認してください。")
                     else:
                         st.error(f"解析エラー: {res.get('error')}")
+
+        elif input_method == "✏️ テキスト検索":
+            # テキスト入力欄とボタン
+            text_query = st.text_input("食べたものを入力 (例: 牛丼 並盛, プロテインバー)", placeholder="例: 鶏むね肉のサラダ")
+            if st.button("栄養素を自動推測"):
+                if text_query:
+                    with st.spinner('AIが成分表を検索中...'):
+                        res = estimate_nutrition_from_text(text_query)
+                        if "error" not in res:
+                            st.session_state.meal_form_data = {
+                                "menu": res.get('menu_name', text_query),
+                                "cal": res.get('calories', 0),
+                                "p": res.get('protein', 0.0),
+                                "f": res.get('fat', 0.0),
+                                "c": res.get('carbs', 0.0)
+                            }
+                            st.success(f"推測完了: {res.get('menu_name')}")
+                        else:
+                            st.error("エラーが発生しました。")
+                else:
+                    st.warning("メニュー名を入力してください。")
 
         st.divider()
         st.write("▼ 内容を確認・修正して保存")
