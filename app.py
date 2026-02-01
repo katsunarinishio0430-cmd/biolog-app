@@ -8,13 +8,13 @@ from datetime import datetime, date, timedelta, timezone
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import altair as alt
+import re
 
 # ==========================================
 # 設定: APIキー & シート設定
 # ==========================================
 DEFAULT_API_KEY = "AIzaSyBOlQW_7uW0g62f_NujUBlMDpWtpefHidc" 
 
-# Secretsの確認と設定
 try:
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -149,12 +149,21 @@ def update_daily_summary_sheet(base_metabolism):
         return df_sum
     return pd.DataFrame()
 
-# ★修正版: Gemini 1.5 Flash を使用し、JSONモードを強制する
+# ★Helper: AIの出力をクリーンなJSONにする関数
+def clean_json_text(text):
+    text = text.replace('```json', '').replace('```', '').strip()
+    # 最初の{から最後の}までを抽出（余計な文章をカット）
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        return match.group(0)
+    return text
+
+# ★修正版: Gemini Pro Vision (画像用)
 def analyze_meal_image(image):
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro-vision') # 安定版モデルに変更
     prompt = """
     この食事画像を解析し、栄養素を推定してください。
-    必ず以下のJSONキーのみを持つJSONデータを出力してください。
+    必ず以下のJSONキーのみを持つJSONデータを出力してください。余計な会話は不要です。
     {
       "menu_name": "メニュー名",
       "calories": 整数(kcal),
@@ -164,22 +173,20 @@ def analyze_meal_image(image):
     }
     """
     try:
-        response = model.generate_content(
-            [prompt, image],
-            generation_config={"response_mime_type": "application/json"}
-        )
-        return json.loads(response.text)
+        response = model.generate_content([prompt, image])
+        json_text = clean_json_text(response.text)
+        return json.loads(json_text)
     except Exception as e:
         return {"error": str(e)}
 
-# ★修正版: テキスト解析も強化
+# ★修正版: Gemini Pro (テキスト用)
 def estimate_nutrition_from_text(text):
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro') # 安定版モデルに変更
     prompt = f"""
     以下の食事メニューの栄養素（カロリー、PFC）を一般的な基準で推定してください。
     メニュー名: {text}
     
-    必ず以下のJSONキーのみを持つJSONデータを出力してください。
+    必ず以下のJSONキーのみを持つJSONデータを出力してください。冒頭の挨拶などは不要です。
     {{
       "menu_name": "メニュー名",
       "calories": 整数(kcal),
@@ -189,11 +196,9 @@ def estimate_nutrition_from_text(text):
     }}
     """
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        return json.loads(response.text)
+        response = model.generate_content(prompt)
+        json_text = clean_json_text(response.text)
+        return json.loads(json_text)
     except Exception as e:
         return {"error": str(e)}
 
@@ -236,7 +241,7 @@ def generate_advice(days=7):
     3. **アクションプラン**: 具体的な修正点（種目、重量、食事内容）。
     """
     
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro') # 安定版モデルに変更
     try:
         response = model.generate_content(prompt)
         return response.text
@@ -468,7 +473,6 @@ with tab3:
                             }
                             st.success(f"推測完了: {res.get('menu_name')}")
                         else:
-                            # 修正箇所: エラー内容を表示するように変更
                             st.error(f"エラーが発生しました: {res.get('error')}")
                 else:
                     st.warning("メニュー名を入力してください。")
