@@ -1,6 +1,7 @@
 streamlit
 pandas
-google-generativeai
+google-generativeai>=0.7.0  # ← このバージョン指定が重要！
 gspread
 oauth2client
 Pillow
+altair
