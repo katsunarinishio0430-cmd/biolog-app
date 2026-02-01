@@ -14,9 +14,15 @@ import altair as alt
 # ==========================================
 DEFAULT_API_KEY = "AIzaSyBOlQW_7uW0g62f_NujUBlMDpWtpefHidc" 
 
-if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-else:
+# ★修正ポイント1: 安全装置 (try-except)
+# PCで実行したとき(secretsがないとき)にエラー落ちしないようにする
+try:
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    else:
+        genai.configure(api_key=DEFAULT_API_KEY)
+except:
+    # secretsが見つからない場合(PC実行時)はこっち
     genai.configure(api_key=DEFAULT_API_KEY)
 
 SHEET_NAME = "biolog_db"
@@ -32,14 +38,26 @@ WS_SUMMARY = "daily_summary"
 # ==========================================
 def connect_to_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    if "gcp_service_account" in st.secrets:
-        key_dict = json.loads(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
-    elif os.path.exists(JSON_FILE):
-        creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
-    else:
-        st.error("認証情報が見つかりません。")
-        return None
+    
+    creds = None
+    # ★修正ポイント2: 認証情報の安全装置
+    try:
+        # クラウド(Secrets)にあるか確認
+        if "gcp_service_account" in st.secrets:
+            key_dict = json.loads(st.secrets["gcp_service_account"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+    except:
+        pass # PC実行時は無視して次へ進む
+
+    # Secretsになければ、PC内のjsonファイルを探す
+    if creds is None:
+        if os.path.exists(JSON_FILE):
+            creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
+        else:
+            # どちらも見つからない場合だけ警告を出す（エラーで止めない）
+            st.warning("⚠️ 認証情報が見つかりません。クラウドならSecrets、PCならjsonファイルを確認してください。")
+            return None
+            
     client = gspread.authorize(creds)
     return client.open(SHEET_NAME)
 
@@ -71,11 +89,10 @@ def load_data(worksheet_name):
     except:
         return pd.DataFrame()
 
-# リスト形式のデータを一括保存する関数へ変更
+# リスト形式のデータを一括保存する関数
 def save_rows_to_sheet(worksheet_name, data_list):
     sh = connect_to_sheet()
     ws = sh.worksheet(worksheet_name)
-    # data_listは辞書のリストなので、値のリストのリストに変換
     rows = [list(d.values()) for d in data_list]
     ws.append_rows(rows)
     load_data.clear()
@@ -167,7 +184,6 @@ if 'sheet_init' not in st.session_state:
     init_sheets()
     st.session_state.sheet_init = True
 
-# ワークアウトの「一時保存リスト」を初期化
 if 'workout_queue' not in st.session_state:
     st.session_state.workout_queue = []
 
@@ -212,7 +228,7 @@ with tab1:
         st.dataframe(
             summary_df,
             column_config={
-                "Date": st.column_config.TextColumn("日付", frozen=True),
+                "Date": st.column_config.TextColumn("日付"),
                 "Total_Out": st.column_config.NumberColumn("総消費 (基礎+運動)", format="%d kcal"),
                 "Balance": st.column_config.ProgressColumn("収支", format="%d kcal", min_value=-1000, max_value=1000),
             },
@@ -281,10 +297,10 @@ with tab3:
             ex_list = ["ベンチプレス", "スクワット", "デッドリフト", "懸垂", "ショルダープレス", "アームカール", "ランニング"]
             ex_name = st.selectbox("種目", ex_list)
             
-            # 【修正】min_value=0.0を指定し、valueを初期値として渡すことでマイナス側への変更を可能に
+            # 【入力制限解除】min_value=0.0, value=60.0 でマイナス入力は防ぎつつ、小さい値も可能に
             weight_in = st.number_input("重量(kg)", min_value=0.0, value=60.0, step=2.5)
             reps_in = st.number_input("回数", min_value=0, value=10, step=1)
-            sets_in = st.number_input("セット", min_value=1, value=1, step=1) # 1セットずつ追加推奨
+            sets_in = st.number_input("セット", min_value=1, value=1, step=1)
             duration_in = st.number_input("時間(分)", min_value=0, value=5, step=1)
             
             # 「リストに追加」ボタン
