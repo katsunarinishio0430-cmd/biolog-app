@@ -15,15 +15,12 @@ import altair as alt
 # ==========================================
 st.set_page_config(layout="wide", page_title="Bio-Log Cloud V2")
 
-# APIキー設定（Streamlit CloudのSecrets対応）
-DEFAULT_API_KEY = "AIzaSyBOlQW_7uW0g62f_NujUBlMDpWtpefHidc" 
-try:
-    if "GEMINI_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    else:
-        genai.configure(api_key=DEFAULT_API_KEY)
-except:
-    genai.configure(api_key=DEFAULT_API_KEY)
+# 【ここが修正箇所】Secretsを無視し、あなたのキーを直接設定します
+# 引用符の中に、取得したキー(AIzaSyDID...)を貼り付けてください
+DEFAULT_API_KEY = "AIzaSyC3QNcPi-OJbl3Hkymepfw3e4Vw937Rua4" 
+
+# Secretsの読み込み処理を削除し、強制的に上記のキーを使います
+genai.configure(api_key=DEFAULT_API_KEY)
 
 SHEET_NAME = "biolog_db"
 JSON_FILE = "service_account.json" 
@@ -38,15 +35,14 @@ WS_SUMMARY = "daily_summary"
 def connect_to_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = None
-    try:
-        # Streamlit Secretsから読み込み
-        if "gcp_service_account" in st.secrets:
-            key_dict = json.loads(st.secrets["gcp_service_account"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
-    except:
-        pass
+    # Secretsからの読み込みをコメントアウト（無効化）
+    # try:
+    #     if "gcp_service_account" in st.secrets:
+    #         key_dict = json.loads(st.secrets["gcp_service_account"])
+    #         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+    # except:
+    #     pass
 
-    # ローカルファイルから読み込み（フォールバック）
     if creds is None:
         if os.path.exists(JSON_FILE):
             creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
@@ -69,7 +65,8 @@ def init_sheets():
         create_if_missing(WS_MEAL, ["Date", "Day", "Menu_Name", "Calories", "Protein", "Fat", "Carbs"])
         create_if_missing(WS_SUMMARY, ["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
     except Exception as e:
-        st.error(f"接続エラー: {e}")
+        # シート接続エラーは一旦無視（AI機能の確認を優先）
+        st.warning(f"Google Sheets未接続: {e}")
 
 @st.cache_data(ttl=60)
 def load_data(worksheet_name):
@@ -82,11 +79,14 @@ def load_data(worksheet_name):
         return pd.DataFrame()
 
 def save_rows_to_sheet(worksheet_name, data_list):
-    sh = connect_to_sheet()
-    ws = sh.worksheet(worksheet_name)
-    rows = [list(d.values()) for d in data_list]
-    ws.append_rows(rows)
-    load_data.clear()
+    try:
+        sh = connect_to_sheet()
+        ws = sh.worksheet(worksheet_name)
+        rows = [list(d.values()) for d in data_list]
+        ws.append_rows(rows)
+        load_data.clear()
+    except:
+        pass
 
 def save_to_sheet(worksheet_name, data_dict):
     save_rows_to_sheet(worksheet_name, [data_dict])
@@ -98,53 +98,56 @@ def calculate_bmr(weight, height, age, gender):
         return (10 * weight) + (6.25 * height) - (5 * age) - 161
 
 def update_daily_summary_sheet(base_metabolism):
-    load_data.clear() 
-    df_w = load_data(WS_WORKOUT)
-    df_m = load_data(WS_MEAL)
-    summary_data = {}
-    
-    if not df_w.empty:
-        if 'Burned_Cal' in df_w.columns:
-            df_w['Burned_Cal'] = pd.to_numeric(df_w['Burned_Cal'], errors='coerce').fillna(0)
-            if 'Day' in df_w.columns:
-                daily_workout = df_w.groupby('Day')['Burned_Cal'].sum().to_dict()
-                for day, cal in daily_workout.items():
+    try:
+        load_data.clear() 
+        df_w = load_data(WS_WORKOUT)
+        df_m = load_data(WS_MEAL)
+        summary_data = {}
+        
+        if not df_w.empty:
+            if 'Burned_Cal' in df_w.columns:
+                df_w['Burned_Cal'] = pd.to_numeric(df_w['Burned_Cal'], errors='coerce').fillna(0)
+                if 'Day' in df_w.columns:
+                    daily_workout = df_w.groupby('Day')['Burned_Cal'].sum().to_dict()
+                    for day, cal in daily_workout.items():
+                        if day not in summary_data: 
+                            summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
+                        summary_data[day]['Workout_Burn'] = cal
+
+        if not df_m.empty:
+            cols = ['Calories', 'Protein', 'Fat', 'Carbs']
+            available_cols = [c for c in cols if c in df_m.columns]
+            if available_cols and 'Day' in df_m.columns:
+                for c in available_cols: df_m[c] = pd.to_numeric(df_m[c], errors='coerce').fillna(0)
+                daily_meal = df_m.groupby('Day')[available_cols].sum()
+                for day, row in daily_meal.iterrows():
                     if day not in summary_data: 
                         summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
-                    summary_data[day]['Workout_Burn'] = cal
+                    if 'Calories' in row: summary_data[day]['Intake'] += row['Calories']
+                    if 'Protein' in row: summary_data[day]['P'] += row['Protein']
+                    if 'Fat' in row: summary_data[day]['F'] += row['Fat']
+                    if 'Carbs' in row: summary_data[day]['C'] += row['Carbs']
 
-    if not df_m.empty:
-        cols = ['Calories', 'Protein', 'Fat', 'Carbs']
-        available_cols = [c for c in cols if c in df_m.columns]
-        if available_cols and 'Day' in df_m.columns:
-            for c in available_cols: df_m[c] = pd.to_numeric(df_m[c], errors='coerce').fillna(0)
-            daily_meal = df_m.groupby('Day')[available_cols].sum()
-            for day, row in daily_meal.iterrows():
-                if day not in summary_data: 
-                    summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
-                if 'Calories' in row: summary_data[day]['Intake'] += row['Calories']
-                if 'Protein' in row: summary_data[day]['P'] += row['Protein']
-                if 'Fat' in row: summary_data[day]['F'] += row['Fat']
-                if 'Carbs' in row: summary_data[day]['C'] += row['Carbs']
-
-    rows = []
-    for day, data in summary_data.items():
-        total_out = base_metabolism + data['Workout_Burn']
-        balance = data['Intake'] - total_out
-        rows.append([day, int(data['Intake']), int(total_out), int(balance), 
-                     round(data['P'], 1), round(data['F'], 1), round(data['C'], 1), int(base_metabolism)])
-    
-    if rows:
-        df_sum = pd.DataFrame(rows, columns=["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
-        df_sum = df_sum.sort_values("Date", ascending=False)
+        rows = []
+        for day, data in summary_data.items():
+            total_out = base_metabolism + data['Workout_Burn']
+            balance = data['Intake'] - total_out
+            rows.append([day, int(data['Intake']), int(total_out), int(balance), 
+                        round(data['P'], 1), round(data['F'], 1), round(data['C'], 1), int(base_metabolism)])
         
-        sh = connect_to_sheet()
-        ws = sh.worksheet(WS_SUMMARY)
-        ws.clear()
-        ws.append_row(["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
-        ws.append_rows(df_sum.values.tolist())
-        return df_sum
-    return pd.DataFrame()
+        if rows:
+            df_sum = pd.DataFrame(rows, columns=["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
+            df_sum = df_sum.sort_values("Date", ascending=False)
+            
+            sh = connect_to_sheet()
+            ws = sh.worksheet(WS_SUMMARY)
+            ws.clear()
+            ws.append_row(["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
+            ws.append_rows(df_sum.values.tolist())
+            return df_sum
+        return pd.DataFrame()
+    except:
+        return pd.DataFrame()
 
 # ==========================================
 # AI関連関数 (Gemini 1.5対応)
@@ -214,7 +217,9 @@ with st.sidebar:
     st.markdown("---")
     st.metric("基礎代謝", f"{int(bmr)} kcal")
     st.metric("TDEE", f"{int(tdee)} kcal")
+    # バージョンとキーの先頭5文字を表示して、キーが更新されたか確認
     st.caption(f"Ver: {genai.__version__}")
+    st.caption(f"Key: {DEFAULT_API_KEY[:5]}...")
 
 # タブ構成
 tab1, tab2, tab3, tab4 = st.tabs(["📊 収支", "📈 分析", "📝 記録", "🤖 コーチ"])
@@ -225,7 +230,6 @@ with tab1:
             update_daily_summary_sheet(tdee)
     df = load_data(WS_SUMMARY)
     if not df.empty:
-        # width警告対策: use_container_width は st.dataframe では推奨されるためそのまま使用
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 with tab2:
@@ -241,7 +245,6 @@ with tab2:
             sel_ex = st.selectbox("種目", ex_list)
             df_chart = df_w[df_w['Exercise'] == sel_ex].sort_values("Date")
             if not df_chart.empty:
-                # 警告対策: use_container_width を外して標準的な描画を試行
                 c = alt.Chart(df_chart).mark_line(point=True).encode(
                     x='Date', y='Volume', tooltip=['Date', 'Weight', 'Reps']
                 ).properties(title=f"{sel_ex} Volume")
@@ -254,7 +257,6 @@ with tab3:
     with col_w:
         st.subheader("🏋️ 筋トレ")
         with st.form("w_form"):
-            # ユーザー指定の種目リスト
             ex_cats = {
                 "胸": ["ダンベルベンチプレス", "インクラインダンベルプレス", "ディップス", "ベンチプレス"], 
                 "背中": ["ロー", "ラットプルダウン", "ダンベルロー", "ケーブルローロー", "懸垂"], 
