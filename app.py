@@ -15,16 +15,14 @@ import altair as alt
 # ==========================================
 st.set_page_config(layout="wide", page_title="Bio-Log Cloud V2")
 
-# 【ここが修正箇所】Secretsを無視し、あなたのキーを直接設定します
-# 引用符の中に、取得したキー(AIzaSyDID...)を貼り付けてください
+# ★★★ ここに新しいAPIキー(biolog-appのもの)を貼り付けてください ★★★
 DEFAULT_API_KEY = "AIzaSyBhAwwVO1hO-GmR7bXr8vIehzAVH1JYVsg" 
 
-# Secretsの読み込み処理を削除し、強制的に上記のキーを使います
+# Secretsを無視して、強制的に上記のキーを使用
 genai.configure(api_key=DEFAULT_API_KEY)
 
 SHEET_NAME = "biolog_db"
 JSON_FILE = "service_account.json" 
-
 WS_WORKOUT = "workout_log"
 WS_MEAL = "meal_log"
 WS_SUMMARY = "daily_summary"
@@ -35,20 +33,10 @@ WS_SUMMARY = "daily_summary"
 def connect_to_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = None
-    # Secretsからの読み込みをコメントアウト（無効化）
-    # try:
-    #     if "gcp_service_account" in st.secrets:
-    #         key_dict = json.loads(st.secrets["gcp_service_account"])
-    #         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
-    # except:
-    #     pass
-
-    if creds is None:
-        if os.path.exists(JSON_FILE):
-            creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
-        else:
-            return None 
-            
+    if os.path.exists(JSON_FILE):
+        creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
+    else:
+        return None 
     client = gspread.authorize(creds)
     return client.open(SHEET_NAME)
 
@@ -65,8 +53,8 @@ def init_sheets():
         create_if_missing(WS_MEAL, ["Date", "Day", "Menu_Name", "Calories", "Protein", "Fat", "Carbs"])
         create_if_missing(WS_SUMMARY, ["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
     except Exception as e:
-        # シート接続エラーは一旦無視（AI機能の確認を優先）
-        st.warning(f"Google Sheets未接続: {e}")
+        # シート接続エラーは一旦無視（AI確認優先）
+        pass
 
 @st.cache_data(ttl=60)
 def load_data(worksheet_name):
@@ -103,42 +91,34 @@ def update_daily_summary_sheet(base_metabolism):
         df_w = load_data(WS_WORKOUT)
         df_m = load_data(WS_MEAL)
         summary_data = {}
-        
         if not df_w.empty:
             if 'Burned_Cal' in df_w.columns:
                 df_w['Burned_Cal'] = pd.to_numeric(df_w['Burned_Cal'], errors='coerce').fillna(0)
                 if 'Day' in df_w.columns:
                     daily_workout = df_w.groupby('Day')['Burned_Cal'].sum().to_dict()
                     for day, cal in daily_workout.items():
-                        if day not in summary_data: 
-                            summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
+                        if day not in summary_data: summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
                         summary_data[day]['Workout_Burn'] = cal
-
         if not df_m.empty:
             cols = ['Calories', 'Protein', 'Fat', 'Carbs']
-            available_cols = [c for c in cols if c in df_m.columns]
-            if available_cols and 'Day' in df_m.columns:
-                for c in available_cols: df_m[c] = pd.to_numeric(df_m[c], errors='coerce').fillna(0)
-                daily_meal = df_m.groupby('Day')[available_cols].sum()
+            avail = [c for c in cols if c in df_m.columns]
+            if avail and 'Day' in df_m.columns:
+                for c in avail: df_m[c] = pd.to_numeric(df_m[c], errors='coerce').fillna(0)
+                daily_meal = df_m.groupby('Day')[avail].sum()
                 for day, row in daily_meal.iterrows():
-                    if day not in summary_data: 
-                        summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
+                    if day not in summary_data: summary_data[day] = {'Intake': 0, 'Workout_Burn': 0, 'P': 0, 'F': 0, 'C': 0}
                     if 'Calories' in row: summary_data[day]['Intake'] += row['Calories']
                     if 'Protein' in row: summary_data[day]['P'] += row['Protein']
                     if 'Fat' in row: summary_data[day]['F'] += row['Fat']
                     if 'Carbs' in row: summary_data[day]['C'] += row['Carbs']
-
         rows = []
         for day, data in summary_data.items():
             total_out = base_metabolism + data['Workout_Burn']
             balance = data['Intake'] - total_out
-            rows.append([day, int(data['Intake']), int(total_out), int(balance), 
-                        round(data['P'], 1), round(data['F'], 1), round(data['C'], 1), int(base_metabolism)])
-        
+            rows.append([day, int(data['Intake']), int(total_out), int(balance), round(data['P'], 1), round(data['F'], 1), round(data['C'], 1), int(base_metabolism)])
         if rows:
             df_sum = pd.DataFrame(rows, columns=["Date", "Intake", "Total_Out", "Balance", "P", "F", "C", "Base_Metabolism"])
             df_sum = df_sum.sort_values("Date", ascending=False)
-            
             sh = connect_to_sheet()
             ws = sh.worksheet(WS_SUMMARY)
             ws.clear()
@@ -162,14 +142,12 @@ def analyze_meal_image(image):
     model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = """
     この食事画像を解析し、栄養素を推定してください。
-    以下のJSONフォーマットのみを出力してください。
-    キーは必ず英語小文字を使用すること。
+    出力は以下のJSONのみ。
     { "menu_name": "メニュー名", "calories": 整数, "protein": 少数, "fat": 少数, "carbs": 少数 }
     """
     try:
         response = model.generate_content([prompt, image])
-        if not response.parts:
-            return {"error": "AI応答生成エラー（Safety Filter等）"}
+        if not response.parts: return {"error": "AI応答生成エラー"}
         return json.loads(clean_json_text(response.text))
     except Exception as e:
         return {"error": str(e)}
@@ -177,8 +155,8 @@ def analyze_meal_image(image):
 def estimate_nutrition_from_text(text):
     model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
-    メニュー名「{text}」の一般的な栄養素を推定してください。
-    以下のJSONフォーマットのみを出力してください。
+    メニュー名「{text}」の栄養素を推定してください。
+    出力は以下のJSONのみ。
     {{ "menu_name": "{text}", "calories": 整数, "protein": 少数, "fat": 少数, "carbs": 少数 }}
     """
     try:
@@ -191,8 +169,6 @@ def estimate_nutrition_from_text(text):
 # UI構築
 # ==========================================
 st.title("☁️ Bio-Log Cloud V2 (JST)")
-
-# 初期化処理
 if 'sheet_init' not in st.session_state:
     init_sheets()
     st.session_state.sheet_init = True
@@ -201,7 +177,6 @@ if 'workout_queue' not in st.session_state:
 if 'meal_form_data' not in st.session_state:
     st.session_state.meal_form_data = {"menu": "", "cal": 0, "p": 0.0, "f": 0.0, "c": 0.0}
 
-# サイドバー
 with st.sidebar:
     st.header("🧬 設定")
     gender = st.radio("性別", ["男性", "女性"])
@@ -209,28 +184,27 @@ with st.sidebar:
     height = st.number_input("身長 (cm)", 100.0, 250.0, 170.0, 0.1)
     weight = st.number_input("体重 (kg)", 30.0, 200.0, 65.0, 0.1)
     activity_level = st.selectbox("運動強度", ("低い", "普通", "高い"), index=1)
-    
     factor = 1.2 if "低い" in activity_level else (1.375 if "普通" in activity_level else 1.55)
     bmr = calculate_bmr(weight, height, age, gender)
     tdee = bmr * factor
-    
     st.markdown("---")
     st.metric("基礎代謝", f"{int(bmr)} kcal")
     st.metric("TDEE", f"{int(tdee)} kcal")
-    # バージョンとキーの先頭5文字を表示して、キーが更新されたか確認
-    st.caption(f"Ver: {genai.__version__}")
-    st.caption(f"Key: {DEFAULT_API_KEY[:5]}...")
+    
+    # デバッグ情報：確実に新しいキーが使われているか表示
+    st.caption("Debug Info:")
+    st.caption(f"Lib Ver: {genai.__version__}")
+    st.caption(f"Using Key: {DEFAULT_API_KEY[:5]}...{DEFAULT_API_KEY[-2:]}")
 
-# タブ構成
 tab1, tab2, tab3, tab4 = st.tabs(["📊 収支", "📈 分析", "📝 記録", "🤖 コーチ"])
 
+# (以下UI部分は変更ないので省略していますが、もし必要なら前のコードの tab1以降を使ってください)
 with tab1:
     if st.button("更新"):
         with st.spinner("更新中..."):
             update_daily_summary_sheet(tdee)
     df = load_data(WS_SUMMARY)
-    if not df.empty:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    if not df.empty: st.dataframe(df, use_container_width=True, hide_index=True)
 
 with tab2:
     st.subheader("推移グラフ")
@@ -239,47 +213,34 @@ with tab2:
         for col in ['Weight', 'Reps', 'Sets', 'Volume']:
             if col in df_w.columns: df_w[col] = pd.to_numeric(df_w[col], errors='coerce').fillna(0)
             else: df_w[col] = 0
-        
         ex_list = df_w['Exercise'].unique()
         if len(ex_list) > 0:
             sel_ex = st.selectbox("種目", ex_list)
             df_chart = df_w[df_w['Exercise'] == sel_ex].sort_values("Date")
             if not df_chart.empty:
-                c = alt.Chart(df_chart).mark_line(point=True).encode(
-                    x='Date', y='Volume', tooltip=['Date', 'Weight', 'Reps']
-                ).properties(title=f"{sel_ex} Volume")
+                c = alt.Chart(df_chart).mark_line(point=True).encode(x='Date', y='Volume', tooltip=['Date', 'Weight', 'Reps']).properties(title=f"{sel_ex} Volume")
                 st.altair_chart(c, theme="streamlit", use_container_width=True)
 
 with tab3:
     col_w, col_m = st.columns(2)
-    
-    # 筋トレ入力カラム
     with col_w:
         st.subheader("🏋️ 筋トレ")
         with st.form("w_form"):
-            ex_cats = {
-                "胸": ["ダンベルベンチプレス", "インクラインダンベルプレス", "ディップス", "ベンチプレス"], 
-                "背中": ["ロー", "ラットプルダウン", "ダンベルロー", "ケーブルローロー", "懸垂"], 
-                "脚": ["スクワット", "デッドリフト", "レッグプレス", "レッグエクステンション", "レッグカール"], 
-                "肩": ["ショルダープレス", "ケーブルサイドレイズ", "サイドレイズ"]
-            }
+            ex_cats = {"胸": ["ダンベルベンチプレス", "インクラインダンベルプレス", "ディップス", "ベンチプレス"], "背中": ["ロー", "ラットプルダウン", "ダンベルロー", "ケーブルローロー", "懸垂"], "脚": ["スクワット", "デッドリフト", "レッグプレス", "レッグエクステンション", "レッグカール"], "肩": ["ショルダープレス", "ケーブルサイドレイズ", "サイドレイズ"]}
             all_ex = [x for v in ex_cats.values() for x in v]
             ex = st.selectbox("種目", all_ex)
             w = st.number_input("重量", 0.0, value=60.0, step=2.5)
             r = st.number_input("回数", 0, value=10)
             s = st.number_input("セット", 1, value=3)
             memo = st.text_input("メモ")
-            
             if st.form_submit_button("リストに追加"):
                 vol = w * r * s
                 burn = round(6.0 * weight * (10/60) * 1.05, 1)
                 now_str = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
                 day_str = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
-                
                 item = {"Date": now_str, "Day": day_str, "Exercise": ex, "Weight": w, "Reps": r, "Sets": s, "Duration": 10, "Burned_Cal": burn, "Volume": vol, "Notes": memo}
                 st.session_state.workout_queue.append(item)
                 st.success(f"追加: {ex}")
-        
         if st.session_state.workout_queue:
             st.dataframe(pd.DataFrame(st.session_state.workout_queue)[["Exercise", "Weight", "Reps"]])
             if st.button("一括保存"):
@@ -288,47 +249,29 @@ with tab3:
                 st.session_state.workout_queue = []
                 st.success("保存完了")
                 st.rerun()
-            if st.button("クリア"):
-                st.session_state.workout_queue = []
-                st.rerun()
+            if st.button("クリア"): st.session_state.workout_queue = []; st.rerun()
 
-    # 食事入力カラム
     with col_m:
         st.subheader("🥗 食事")
         mode = st.radio("入力", ["📸 画像", "✏️ 文字", "🖐️ 手動"], horizontal=True)
-        
         if mode == "📸 画像":
             f = st.file_uploader("画像", type=["jpg", "png"])
             if f and st.button("解析"):
                 with st.spinner("Gemini 1.5 Flash 解析中..."):
                     res = analyze_meal_image(Image.open(f))
                     if "error" not in res:
-                        st.session_state.meal_form_data = { 
-                            "menu": res.get("menu_name",""), 
-                            "cal": res.get("calories",0), 
-                            "p": res.get("protein",0), 
-                            "f": res.get("fat",0), 
-                            "c": res.get("carbs",0) 
-                        }
+                        st.session_state.meal_form_data = { "menu": res.get("menu_name",""), "cal": res.get("calories",0), "p": res.get("protein",0), "f": res.get("fat",0), "c": res.get("carbs",0) }
                         st.success("解析成功")
                     else: st.error(res["error"])
-        
         elif mode == "✏️ 文字":
             q = st.text_input("メニュー名")
             if q and st.button("自動推測"):
                 with st.spinner("Gemini 1.5 Flash 推測中..."):
                     res = estimate_nutrition_from_text(q)
                     if "error" not in res:
-                        st.session_state.meal_form_data = { 
-                            "menu": res.get("menu_name", q), 
-                            "cal": res.get("calories",0), 
-                            "p": res.get("protein",0), 
-                            "f": res.get("fat",0), 
-                            "c": res.get("carbs",0) 
-                        }
+                        st.session_state.meal_form_data = { "menu": res.get("menu_name", q), "cal": res.get("calories",0), "p": res.get("protein",0), "f": res.get("fat",0), "c": res.get("carbs",0) }
                         st.success("推測成功")
                     else: st.error(res["error"])
-        
         with st.form("m_form"):
             val = st.session_state.meal_form_data
             name = st.text_input("品名", value=val["menu"])
@@ -337,7 +280,6 @@ with tab3:
             p = c1.number_input("P", value=float(val["p"]))
             f = c2.number_input("F", value=float(val["f"]))
             c = c3.number_input("C", value=float(val["c"]))
-            
             if st.form_submit_button("保存"):
                 now_str = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
                 day_str = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
@@ -346,8 +288,4 @@ with tab3:
                 update_daily_summary_sheet(tdee)
                 st.session_state.meal_form_data = {"menu": "", "cal": 0, "p": 0, "f": 0, "c": 0}
                 st.success("保存しました")
-                st.rerun()
-
-with tab4:
-    st.header("🤖 AIコーチ")
-    st.info("ここに将来的なアドバイス機能を実装予定")
+                st.rerun
