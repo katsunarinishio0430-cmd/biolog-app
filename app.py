@@ -17,7 +17,7 @@ st.set_page_config(layout="wide", page_title="Bio-Log Cloud V2")
 
 # 【ここが修正箇所】Secretsを無視し、あなたのキーを直接設定します
 # 引用符の中に、取得したキー(AIzaSyDID...)を貼り付けてください
-DEFAULT_API_KEY = "AIzaSyC3QNcPi-OJbl3Hkymepfw3e4Vw937Rua4" 
+DEFAULT_API_KEY = "AIzaSyBhAwwVO1hO-GmR7bXr8vIehzAVH1JYVsg" 
 
 # Secretsの読み込み処理を削除し、強制的に上記のキーを使います
 genai.configure(api_key=DEFAULT_API_KEY)
